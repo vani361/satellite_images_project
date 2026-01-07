@@ -1,0 +1,103 @@
+// var table= Table projects/house-price-project/assets/train;   //imported directly
+// Convert CSV to points automatically
+var points = ee.FeatureCollection(table);
+
+var region = points.map(function(feature) {
+var square = feature.geometry().buffer(500).bounds();
+  return feature.setGeometry(square);
+});
+
+var image=ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') 
+.filterDate('2020-01-01','2020-12-31') 
+.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',20)) 
+.filterBounds(region) 
+.select(['B4','B3','B2'])
+.median(); 
+var visParamsTrue= {bands :['B4','B3','B2'],min: 0,max: 2500,gamma: 1.1};
+Map.addLayer(image,visParamsTrue,"Sentinel 2020"); 
+
+//Map.addLayer(table, {color: 'red'}, 'CSV Points');
+//Map.centerObject(region,10);
+
+
+
+// Union of all buffers → dataset region
+var datasetRegion = region.geometry();
+
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterDate('2020-01-01','2020-12-31')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',20))
+  .filterBounds(datasetRegion)
+  .median()
+  .select([ 'B4','B3','B2','B11','B8'])
+  .clip(datasetRegion);
+
+//urban density
+var ndbi = s2
+.normalizedDifference(['B11', 'B8']).rename('NDBI');
+//water bodies
+var ndwi = s2
+.normalizedDifference(['B3', 'B8']).rename('NDWI');
+//green
+var ndvi = s2
+.normalizedDifference(['B8','B4'])
+  .rename('NDVI');
+//hills
+var dem = ee.Image('USGS/SRTMGL1_003')
+  .clip(datasetRegion)
+  .rename('Elevation');
+
+var slope = ee.Terrain.slope(dem)
+  .rename('Slope');
+
+var water = ee.Image('JRC/GSW1_4/GlobalSurfaceWater')
+  .select('occurrence')
+  .gt(0)
+  .selfMask()
+  .clip(datasetRegion);
+var waterVectors = water.reduceToVectors({
+  geometry: datasetRegion,
+  scale: 30,
+  geometryType: 'polygon',
+  maxPixels: 1e8
+});
+var WaterDist = region.map(function(f) {
+
+  var nearest = waterVectors
+    .map(function(w) {
+      return w.set('dist', w.geometry().distance(f.geometry(),1));
+    })
+    .sort('dist')
+    .first();  
+  
+  return f.set('dist_water', nearest.get('dist'));
+});
+
+Map.addLayer(ndwi, {
+  min: -0.2,
+  max: 0.8,
+  palette: ['brown', 'yellow', 'blue']
+}, 'NDVI');
+
+Map.addLayer(region, {color:'red'}, 'Houses');
+Map.centerObject(region, 12);
+
+var housesWithDistance = WaterDist; 
+
+var featureImage = ee.Image.cat([
+  ndvi,
+  ndwi,
+  ndbi,
+  dem.rename('Elevation'),
+  slope.rename('Slope')
+]);
+
+var housesWithAllFeatures = featureImage.reduceRegions({
+  collection: housesWithDistance,   // points or buffers
+  reducer: ee.Reducer.mean(),
+  scale: 10
+});
+print(housesWithAllFeatures.limit(5))
+
+
+
